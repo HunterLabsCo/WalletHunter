@@ -151,7 +151,7 @@ export default function LandingPage() {
   return (
     <div className="min-h-screen bg-background">
       <nav className="border-b border-border">
-        <div className="max-w-6xl mx-auto px-6 flex items-center justify-between h-16">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 flex items-center justify-between h-16">
           <Link href="/" className="flex items-center gap-2">
             <div className="w-8 h-8 bg-primary rounded-sm flex items-center justify-center">
               <span className="text-primary-foreground font-bold text-sm">W</span>
@@ -160,8 +160,8 @@ export default function LandingPage() {
               Wallet<span className="text-primary">Hunter</span>
             </span>
           </Link>
-          <div className="flex items-center gap-4">
-            <Link href="/pricing" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+          <div className="flex items-center gap-2 sm:gap-4">
+            <Link href="/pricing" className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:block">
               Pricing
             </Link>
             <Link href="/login"><Button variant="ghost" size="sm">Sign In</Button></Link>
@@ -170,13 +170,13 @@ export default function LandingPage() {
         </div>
       </nav>
 
-      <section className="py-24 px-6">
+      <section className="py-12 sm:py-24 px-4 sm:px-6">
         <div className="max-w-4xl mx-auto text-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-primary/10 text-primary text-sm font-medium mb-6">
             <Zap className="w-4 h-4" />
             Solana Wallet Intelligence
           </div>
-          <h1 className="text-5xl sm:text-6xl font-bold tracking-tight leading-tight mb-6">
+          <h1 className="text-3xl sm:text-5xl md:text-6xl font-bold tracking-tight leading-tight mb-6">
             Find the wallets<br />
             <span className="text-primary">printing money</span> on Solana
           </h1>
@@ -184,15 +184,15 @@ export default function LandingPage() {
             WalletHunter scans trending coins, filters out bots, and surfaces the most profitable human traders.
             Stop guessing. Start copying the wallets that actually win.
           </p>
-          <div className="flex items-center justify-center gap-4">
-            <Link href="/register"><Button size="lg" className="gap-2">Start Hunting <ArrowRight className="w-4 h-4" /></Button></Link>
-            <Link href="#how-it-works"><Button variant="secondary" size="lg">How It Works</Button></Link>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4">
+            <Link href="/register"><Button size="lg" className="gap-2 w-full sm:w-auto">Start Hunting <ArrowRight className="w-4 h-4" /></Button></Link>
+            <Link href="#how-it-works"><Button variant="secondary" size="lg" className="w-full sm:w-auto">How It Works</Button></Link>
           </div>
           <p className="mt-4 text-sm text-muted-foreground">Free tier available. No credit card required.</p>
         </div>
       </section>
 
-      <section id="how-it-works" className="py-20 px-6 border-t border-border">
+      <section id="how-it-works" className="py-12 sm:py-20 px-4 sm:px-6 border-t border-border">
         <div className="max-w-4xl mx-auto">
           <h2 className="text-3xl font-bold text-center mb-4">How It Works</h2>
           <p className="text-muted-foreground text-center mb-16 max-w-xl mx-auto">Three steps between you and the most profitable wallets on Solana.</p>
@@ -212,9 +212,9 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="py-20 px-6 border-t border-border">
+      <section className="py-12 sm:py-20 px-4 sm:px-6 border-t border-border">
         <div className="max-w-6xl mx-auto">
-          <h2 className="text-3xl font-bold text-center mb-4">Built for Solana Traders</h2>
+          <h2 className="text-2xl sm:text-3xl font-bold text-center mb-4">Built for Solana Traders</h2>
           <p className="text-muted-foreground text-center mb-16 max-w-xl mx-auto">Every feature is designed to give you an unfair advantage in discovering and tracking profitable wallets.</p>
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {features.map((feature) => (
@@ -232,7 +232,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="pricing" className="py-20 px-6 border-t border-border">
+      <section id="pricing" className="py-12 sm:py-20 px-4 sm:px-6 border-t border-border">
         <div className="max-w-6xl mx-auto">
           <h2 className="text-3xl font-bold text-center mb-4">Simple Pricing</h2>
           <p className="text-muted-foreground text-center mb-16 max-w-xl mx-auto">Pay with SOL or USDC. No credit card. No auto-charges. Cancel anytime by simply not renewing.</p>
@@ -284,7 +284,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="py-20 px-6 border-t border-border">
+      <section className="py-12 sm:py-20 px-4 sm:px-6 border-t border-border">
         <div className="max-w-3xl mx-auto">
           <h2 className="text-3xl font-bold text-center mb-16">Frequently Asked Questions</h2>
           <div className="space-y-8">
@@ -298,7 +298,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="py-20 px-6 border-t border-border">
+      <section className="py-12 sm:py-20 px-4 sm:px-6 border-t border-border">
         <div className="max-w-2xl mx-auto text-center">
           <h2 className="text-3xl font-bold mb-4">
             Stop searching manually.<br />
@@ -309,8 +309,8 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <footer className="border-t border-border py-8 px-6">
-        <div className="max-w-6xl mx-auto flex items-center justify-between text-sm text-muted-foreground">
+      <footer className="border-t border-border py-8 px-4 sm:px-6">
+        <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 bg-primary rounded-sm flex items-center justify-center">
               <span className="text-primary-foreground font-bold text-xs">W</span>
