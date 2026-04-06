@@ -27,8 +27,23 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full">
+      <head>
+        <link rel="apple-touch-icon" sizes="192x192" href="/icons/icon-192x192.png" />
+        <link rel="apple-touch-icon" sizes="512x512" href="/icons/icon-512x512.png" />
+      </head>
       <body className="min-h-full bg-background text-foreground font-sans antialiased">
         {children}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              if ('serviceWorker' in navigator) {
+                window.addEventListener('load', () => {
+                  navigator.serviceWorker.register('/sw.js').catch(() => {});
+                });
+              }
+            `,
+          }}
+        />
       </body>
     </html>
   );
