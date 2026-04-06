@@ -3,6 +3,8 @@ import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { scans, scanWalletResults, discoveredWallets, subscriptions } from "@/lib/db/schema";
 import { eq, desc, sql } from "drizzle-orm";
+import { checkRateLimit, RATE_LIMITS } from "@/lib/utils/rate-limiter";
+import { cacheThrough } from "@/lib/cache/redis";
 
 export async function GET() {
   const session = await auth();
@@ -12,6 +14,15 @@ export async function GET() {
   }
 
   const userId = session.user.id;
+
+  // Rate limit
+  const rl = await checkRateLimit(`results:${userId}`, RATE_LIMITS.scanResults);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: "Too many requests." },
+      { status: 429, headers: { "Retry-After": String(rl.resetAt - Math.floor(Date.now() / 1000)) } }
+    );
+  }
 
   // Get subscription tier to determine result limits
   const [sub] = await db

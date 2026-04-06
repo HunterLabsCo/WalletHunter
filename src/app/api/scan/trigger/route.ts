@@ -4,6 +4,7 @@ import { runScanPipeline } from "@/lib/scanner/pipeline";
 import { db } from "@/lib/db";
 import { scans, subscriptions } from "@/lib/db/schema";
 import { eq, and, gte, sql } from "drizzle-orm";
+import { checkRateLimit, RATE_LIMITS } from "@/lib/utils/rate-limiter";
 
 // Scan limits per tier
 const SCAN_LIMITS: Record<string, number> = {
@@ -21,6 +22,15 @@ export async function POST() {
   }
 
   const userId = session.user.id;
+
+  // Rate limit check (per-minute burst protection)
+  const rl = await checkRateLimit(`scan:${userId}`, RATE_LIMITS.scanTrigger);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: "Too many requests. Please wait before scanning again." },
+      { status: 429, headers: { "Retry-After": String(rl.resetAt - Math.floor(Date.now() / 1000)) } }
+    );
+  }
 
   // Check subscription tier for scan limits
   const [sub] = await db

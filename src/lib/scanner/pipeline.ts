@@ -6,7 +6,9 @@
  * 2. Fetch top traders per coin via Helius
  * 3. Filter by profitability (>= 3x PNL ratio)
  * 4. Filter bots (hard gates + behavioral scoring)
- * 5. Persist results to database
+ * 5. Calculate win rates (FIFO cost basis, 7d/30d/all-time)
+ * 6. Filter by win rate (>= 57% on 30d)
+ * 7. Persist results to database
  *
  * All scoring/filtering logic runs SERVER-SIDE ONLY.
  */
@@ -15,6 +17,7 @@ import { fetchTrendingCoins, type TrendingCoin } from "@/lib/external-apis/dexsc
 import { fetchTopTradersForToken } from "@/lib/external-apis/helius";
 import { filterByProfitability } from "./profitability-filter";
 import { filterBots } from "./bot-filter";
+import { filterByWinRate } from "./winrate-calculator";
 import { db } from "@/lib/db";
 import {
   scans,
@@ -143,17 +146,34 @@ export async function runScanPipeline(
       `[Pipeline] ${humanWallets.length} wallets passed bot filter`
     );
 
-    // Step 5: Persist results
+    // Step 5: Win rate filter (>= 57% on 30d)
+    console.log("[Pipeline] Calculating win rates...");
+    const winRateWallets = filterByWinRate(
+      humanWallets.map((w) => ({
+        walletAddress: w.walletAddress,
+        swaps: w.swaps,
+      }))
+    );
+    console.log(
+      `[Pipeline] ${winRateWallets.length} wallets passed win rate filter (>= 57%)`
+    );
+
+    // Step 6: Persist results
     console.log("[Pipeline] Persisting results...");
     const resultWallets: ScanResult["wallets"] = [];
 
-    for (const wallet of humanWallets) {
+    for (const wallet of winRateWallets) {
       const profData = profitable.find(
         (p) => p.walletAddress === wallet.walletAddress
       );
-      if (!profData) continue;
+      const botData = humanWallets.find(
+        (h) => h.walletAddress === wallet.walletAddress
+      );
+      if (!profData || !botData) continue;
 
-      // Upsert discovered wallet
+      const wr = wallet.winRate;
+
+      // Upsert discovered wallet with win rate data
       const existing = await db
         .select({ id: discoveredWallets.id })
         .from(discoveredWallets)
@@ -164,8 +184,11 @@ export async function runScanPipeline(
         await db
           .update(discoveredWallets)
           .set({
-            botScore: wallet.botScore,
-            totalTrades: wallet.swaps.length,
+            botScore: botData.botScore,
+            winrate7d: wr.winrate7d,
+            winrate30d: wr.winrate30d,
+            winrateAlltime: wr.winrateAlltime,
+            totalTrades: wr.totalClosedTrades + wr.openPositions,
             lastActive: wallet.swaps[0]?.blockTime ?? new Date(),
             updatedAt: new Date(),
           })
@@ -173,8 +196,11 @@ export async function runScanPipeline(
       } else {
         await db.insert(discoveredWallets).values({
           address: wallet.walletAddress,
-          botScore: wallet.botScore,
-          totalTrades: wallet.swaps.length,
+          botScore: botData.botScore,
+          winrate7d: wr.winrate7d,
+          winrate30d: wr.winrate30d,
+          winrateAlltime: wr.winrateAlltime,
+          totalTrades: wr.totalClosedTrades + wr.openPositions,
           lastActive: wallet.swaps[0]?.blockTime ?? new Date(),
         });
       }
@@ -190,7 +216,7 @@ export async function runScanPipeline(
 
       resultWallets.push({
         address: wallet.walletAddress,
-        botScore: wallet.botScore,
+        botScore: botData.botScore,
         pnlRatio: profData.pnlRatio,
         realizedPnl: profData.realizedPnl,
         amountBought: profData.amountBought,
