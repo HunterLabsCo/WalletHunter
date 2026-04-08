@@ -1,16 +1,25 @@
 import { auth } from "@/lib/auth";
 import { NextResponse } from "next/server";
+import { ADMIN_COOKIE_NAME, verifyAdminToken } from "@/lib/admin/session";
 
-export default auth((req) => {
+export default auth(async (req) => {
   const { pathname } = req.nextUrl;
   const isLoggedIn = !!req.auth;
 
-  // Protected routes
-  const protectedPaths = ["/dashboard", "/settings", "/billing", "/scans", "/watchlist", "/wallet"];
+  // Protected user routes
+  const protectedPaths = [
+    "/dashboard",
+    "/settings",
+    "/billing",
+    "/scans",
+    "/watchlist",
+    "/wallet",
+  ];
   const isProtected = protectedPaths.some((path) => pathname.startsWith(path));
 
-  // Admin routes
+  // Admin routes — completely separate from user auth
   const isAdminPath = pathname.startsWith("/admin");
+  const isAdminLoginPage = pathname === "/admin/login";
 
   // Auth pages (redirect if already logged in)
   const isAuthPage = pathname === "/login" || pathname === "/register";
@@ -21,8 +30,21 @@ export default auth((req) => {
     return NextResponse.redirect(loginUrl);
   }
 
-  if (isAdminPath && !isLoggedIn) {
-    return NextResponse.redirect(new URL("/login", req.url));
+  if (isAdminPath && !isAdminLoginPage) {
+    const token = req.cookies.get(ADMIN_COOKIE_NAME)?.value;
+    const adminSession = await verifyAdminToken(token);
+    if (!adminSession) {
+      return NextResponse.redirect(new URL("/admin/login", req.url));
+    }
+  }
+
+  if (isAdminLoginPage) {
+    // If already a valid admin, skip straight to dashboard
+    const token = req.cookies.get(ADMIN_COOKIE_NAME)?.value;
+    const adminSession = await verifyAdminToken(token);
+    if (adminSession) {
+      return NextResponse.redirect(new URL("/admin", req.url));
+    }
   }
 
   if (isAuthPage && isLoggedIn) {
@@ -36,7 +58,10 @@ export default auth((req) => {
   response.headers.set("X-Frame-Options", "DENY");
   response.headers.set("X-XSS-Protection", "1; mode=block");
   response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
-  response.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  response.headers.set(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=()"
+  );
 
   return response;
 });

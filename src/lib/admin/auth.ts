@@ -1,39 +1,45 @@
 /**
  * Admin authentication helper — SERVER-SIDE ONLY
  *
- * Checks if the current session user is an admin.
- * Admin users must exist in the admin_users table.
+ * Reads the wh_admin_session cookie (HMAC-signed), verifies it, and
+ * confirms the admin still exists in the admin_users table.
+ *
+ * Completely separate from regular user NextAuth sessions.
  */
 
-import { auth } from "@/lib/auth";
+import { cookies } from "next/headers";
 import { db } from "@/lib/db";
 import { adminUsers } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { ADMIN_COOKIE_NAME, verifyAdminToken } from "./session";
 
 export interface AdminSession {
-  userId: string;
   adminId: string;
+  username: string;
   role: "owner" | "admin";
 }
 
 /**
- * Verify the current session is an admin. Returns admin session or null.
+ * Verify the current admin session cookie. Returns session or null.
  */
 export async function requireAdmin(): Promise<AdminSession | null> {
-  const session = await auth();
-  if (!session?.user?.id) return null;
+  const cookieStore = await cookies();
+  const token = cookieStore.get(ADMIN_COOKIE_NAME)?.value;
+  const payload = await verifyAdminToken(token);
+  if (!payload) return null;
 
+  // Confirm admin still exists (not deleted or deactivated)
   const [admin] = await db
-    .select()
+    .select({ id: adminUsers.id, role: adminUsers.role, username: adminUsers.username })
     .from(adminUsers)
-    .where(eq(adminUsers.userId, session.user.id))
+    .where(eq(adminUsers.id, payload.adminId))
     .limit(1);
 
   if (!admin) return null;
 
   return {
-    userId: session.user.id,
     adminId: admin.id,
+    username: admin.username ?? payload.username,
     role: admin.role,
   };
 }

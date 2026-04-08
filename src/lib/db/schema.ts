@@ -127,10 +127,18 @@ export const userWatchlist = pgTable("user_watchlist", {
 
 export const adminUsers = pgTable("admin_users", {
   id: uuid("id").defaultRandom().primaryKey(),
-  userId: uuid("user_id").references(() => users.id).notNull().unique(),
+  // userId is nullable: admin accounts are completely separate from regular users.
+  // Kept for backward-compat with any pre-existing rows that linked to a user.
+  userId: uuid("user_id").references(() => users.id).unique(),
+  username: varchar("username", { length: 64 }),
+  passwordHash: text("password_hash"),
   role: adminRoleEnum("role").notNull().default("admin"),
+  lastLoginAt: timestamp("last_login_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-}, (t) => [uniqueIndex("admin_user_idx").on(t.userId)]);
+}, (t) => [
+  uniqueIndex("admin_user_idx").on(t.userId),
+  uniqueIndex("admin_username_idx").on(t.username),
+]);
 
 export const adminAuditLog = pgTable("admin_audit_log", {
   id: uuid("id").defaultRandom().primaryKey(),
