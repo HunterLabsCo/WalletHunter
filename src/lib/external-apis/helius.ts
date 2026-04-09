@@ -17,6 +17,12 @@ function getApiKey(): string {
 const HELIUS_BASE = "https://api.helius.xyz";
 const RPC_BASE = "https://mainnet.helius-rpc.com";
 
+// Well-known mints used for USD denomination
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+const STABLE_MINTS = new Set([USDC_MINT, USDT_MINT]);
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface HeliusTransaction {
@@ -114,6 +120,15 @@ export async function getTokenPrice(mint: string): Promise<number> {
   }
 }
 
+/**
+ * Fetch the current SOL/USD spot price from Jupiter.
+ * Used to convert lamport flows on every swap into USD for PNL math.
+ * Cached for 60s.
+ */
+export async function getSolPriceUsd(): Promise<number> {
+  return getTokenPrice(SOL_MINT);
+}
+
 // ─── Top Traders from Token ────────────────────────────────────────────────
 
 /**
@@ -171,11 +186,17 @@ export async function fetchTopTradersForToken(
 // ─── Wallet Transaction History ────────────────────────────────────────────
 
 /**
- * Fetch all swap transactions for a wallet (last 90 days max)
+ * Fetch all swap transactions for a wallet (last 90 days max).
+ *
+ * @param solPriceUsd - Current SOL/USD price used to denominate the SOL leg
+ *   of every swap into USD. Pass the same value for the whole scan so PNL is
+ *   self-consistent. If 0/omitted, swaps that pay/receive SOL will have
+ *   amountUsd = 0 and won't contribute to profitability/win-rate math.
  */
 export async function fetchWalletSwaps(
   walletAddress: string,
-  daysBack = 30
+  daysBack = 30,
+  solPriceUsd = 0
 ): Promise<ParsedSwap[]> {
   const apiKey = getApiKey();
   const cutoffTime = Math.floor(Date.now() / 1000) - daysBack * 86400;
@@ -204,7 +225,7 @@ export async function fetchWalletSwaps(
         break;
       }
 
-      const parsed = parseSwapTransaction(tx, walletAddress);
+      const parsed = parseSwapTransaction(tx, walletAddress, solPriceUsd);
       if (parsed) swaps.push(parsed);
     }
 
@@ -218,47 +239,98 @@ export async function fetchWalletSwaps(
 }
 
 /**
- * Parse a Helius transaction into a structured swap
+ * Parse a Helius transaction into a structured swap.
+ *
+ * Determines whether the wallet bought or sold the non-stable token, and
+ * computes the USD value of the swap from the SOL/USDC/USDT counter-leg.
+ *
+ * @param solPriceUsd - SOL/USD spot price (passed in so a single scan stays
+ *   self-consistent and we don't refetch the price 10k times).
  */
 function parseSwapTransaction(
   tx: HeliusTransaction,
-  walletAddress: string
+  walletAddress: string,
+  solPriceUsd: number
 ): ParsedSwap | null {
   if (!tx.events?.swap) return null;
 
   const swap = tx.events.swap;
   const blockTime = new Date(tx.timestamp * 1000);
 
-  // Determine if this is a buy or sell relative to the wallet
-  // Buy = wallet receives token, Sell = wallet sends token
   const tokenOutputs = swap.tokenOutputs ?? [];
   const tokenInputs = swap.tokenInputs ?? [];
 
-  // Find outputs going TO this wallet (wallet received tokens = BUY)
-  const received = tokenOutputs.find((o) => o.userAccount === walletAddress);
-  // Find inputs FROM this wallet (wallet sent tokens = SELL)
-  const sent = tokenInputs.find((i) => i.userAccount === walletAddress);
+  // Wallet's non-stable token movements. Stables are the *payment* leg —
+  // we never want to mark a USDC receipt as a "buy of USDC".
+  const receivedNonStable = tokenOutputs.find(
+    (o) =>
+      o.userAccount === walletAddress &&
+      o.mint &&
+      !STABLE_MINTS.has(o.mint) &&
+      o.tokenAmount > 0
+  );
+  const sentNonStable = tokenInputs.find(
+    (i) =>
+      i.userAccount === walletAddress &&
+      i.mint &&
+      !STABLE_MINTS.has(i.mint) &&
+      i.tokenAmount > 0
+  );
 
-  if (received && received.mint && received.tokenAmount > 0) {
+  // Compute the USD value the wallet paid (when buying) or received (when
+  // selling) by inspecting the SOL/stablecoin leg of the swap.
+  const usdValueOfWalletInputs = (): number => {
+    const solPaid =
+      swap.nativeInput && swap.nativeInput.account === walletAddress
+        ? Number(swap.nativeInput.amount) / 1e9
+        : 0;
+    const stablePaid = tokenInputs
+      .filter(
+        (i) =>
+          i.userAccount === walletAddress &&
+          i.mint &&
+          STABLE_MINTS.has(i.mint)
+      )
+      .reduce((sum, i) => sum + i.tokenAmount, 0);
+    return solPaid * solPriceUsd + stablePaid;
+  };
+
+  const usdValueOfWalletOutputs = (): number => {
+    const solReceived =
+      swap.nativeOutput && swap.nativeOutput.account === walletAddress
+        ? Number(swap.nativeOutput.amount) / 1e9
+        : 0;
+    const stableReceived = tokenOutputs
+      .filter(
+        (o) =>
+          o.userAccount === walletAddress &&
+          o.mint &&
+          STABLE_MINTS.has(o.mint)
+      )
+      .reduce((sum, o) => sum + o.tokenAmount, 0);
+    return solReceived * solPriceUsd + stableReceived;
+  };
+
+  if (receivedNonStable) {
     return {
       walletAddress,
-      tokenAddress: received.mint,
+      tokenAddress: receivedNonStable.mint,
       side: "buy",
-      amountToken: received.tokenAmount,
-      amountUsd: 0, // priced later
+      amountToken: receivedNonStable.tokenAmount,
+      amountUsd: usdValueOfWalletInputs(),
       txSignature: tx.signature,
       blockTime,
       programId: tx.source ?? "",
     };
   }
 
-  if (sent && sent.mint && sent.tokenAmount > 0) {
+  if (sentNonStable) {
     return {
       walletAddress,
-      tokenAddress: sent.mint,
+      tokenAddress: sentNonStable.mint,
       side: "sell",
-      amountToken: sent.tokenAmount,
-      amountUsd: 0, // priced later
+      amountToken: sentNonStable.tokenAmount,
+      amountUsd: usdValueOfWalletOutputs(),
       txSignature: tx.signature,
       blockTime,
       programId: tx.source ?? "",
