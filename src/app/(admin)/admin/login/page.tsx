@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { signIn } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -34,6 +35,16 @@ export default function AdminLoginPage() {
       });
 
       if (res.ok) {
+        const data = await res.json();
+        // Also sign into NextAuth so the admin can use the main site
+        // features with the same credentials (whale lifetime tier).
+        if (data.userEmail) {
+          await signIn("credentials", {
+            email: data.userEmail,
+            password,
+            redirect: false,
+          });
+        }
         router.push("/admin");
         router.refresh();
         return;
