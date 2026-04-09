@@ -132,8 +132,18 @@ export async function getSolPriceUsd(): Promise<number> {
 // ─── Top Traders from Token ────────────────────────────────────────────────
 
 /**
- * Get top traders for a token by fetching recent swap transactions
- * and ranking by realized PNL
+ * Get top traders for a token by fetching recent swap transactions and
+ * extracting the human signer (fee payer) of each swap.
+ *
+ * IMPORTANT: We *only* use `tx.feePayer`, not `tokenInputs[].userAccount` /
+ * `tokenOutputs[].userAccount`. For Jupiter / aggregator swaps, those user
+ * account fields point at routing PDAs (program-owned accounts that move
+ * tokens between AMMs as part of the swap path), not human wallets. Querying
+ * those PDAs for swap history returns empty results, which silently
+ * eliminates every candidate wallet downstream.
+ *
+ * The fee payer is the wallet that signed and paid for the transaction —
+ * that's the actual trader.
  */
 export async function fetchTopTradersForToken(
   tokenMint: string,
@@ -141,7 +151,7 @@ export async function fetchTopTradersForToken(
 ): Promise<Array<{ walletAddress: string; realizedPnl: number; amountBought: number; pnlRatio: number }>> {
   const apiKey = getApiKey();
 
-  // Fetch recent parsed transactions for this token
+  // Fetch recent parsed swap transactions involving this token
   const res = await fetch(
     `${HELIUS_BASE}/v0/addresses/${tokenMint}/transactions?api-key=${apiKey}&type=SWAP&limit=100`,
     { next: { revalidate: 0 } }
@@ -155,25 +165,21 @@ export async function fetchTopTradersForToken(
 
   const txns: HeliusTransaction[] = await res.json();
 
-  // Collect unique wallet addresses from swap events
-  const walletSet = new Set<string>();
+  // Count appearances per fee payer so we can prefer wallets that have
+  // traded this token multiple times (more likely to be active humans, less
+  // likely to be one-shot test wallets).
+  const feePayerCounts = new Map<string, number>();
   for (const tx of txns) {
-    if (tx.events?.swap) {
-      const swap = tx.events.swap;
-      const accounts = [
-        ...(swap.tokenInputs ?? []).map((t) => t.userAccount),
-        ...(swap.tokenOutputs ?? []).map((t) => t.userAccount),
-      ];
-      for (const acc of accounts) {
-        if (acc && !acc.startsWith("11111")) walletSet.add(acc);
-      }
-    }
-    if (tx.feePayer) walletSet.add(tx.feePayer);
+    if (!tx.events?.swap) continue;
+    const fp = tx.feePayer;
+    if (!fp || fp.startsWith("11111")) continue;
+    feePayerCounts.set(fp, (feePayerCounts.get(fp) ?? 0) + 1);
   }
 
-  // We return the wallets — PNL calculation happens in the pipeline
-  // with full trade history per wallet
-  const wallets = Array.from(walletSet).slice(0, limit);
+  const wallets = [...feePayerCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([addr]) => addr);
 
   return wallets.map((addr) => ({
     walletAddress: addr,

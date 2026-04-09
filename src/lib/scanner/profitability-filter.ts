@@ -43,11 +43,20 @@ export async function filterByProfitability(
 
   const results: WalletProfitability[] = [];
 
+  // Diagnostic counters so we can see WHERE wallets get dropped when the
+  // pipeline returns zero results.
+  let withSwapHistory = 0;
+  let withMinTrades = 0;
+  let withPricedBuys = 0;
+  const pnlRatioHistogram: number[] = [];
+
   for (const address of walletAddresses) {
     try {
       const swaps = await fetchWalletSwaps(address, daysBack, solPriceUsd);
 
+      if (swaps.length > 0) withSwapHistory++;
       if (swaps.length < MIN_TRADES) continue;
+      withMinTrades++;
 
       // Group swaps by token
       const byToken = new Map<string, ParsedSwap[]>();
@@ -78,9 +87,11 @@ export async function filterByProfitability(
       }
 
       if (totalBoughtUsd <= 0) continue;
+      withPricedBuys++;
 
       const realizedPnl = totalSoldUsd - totalBoughtUsd;
       const pnlRatio = totalSoldUsd / totalBoughtUsd;
+      pnlRatioHistogram.push(pnlRatio);
 
       if (pnlRatio >= MIN_PNL_RATIO) {
         results.push({
@@ -99,6 +110,19 @@ export async function filterByProfitability(
       continue;
     }
   }
+
+  const sortedRatios = [...pnlRatioHistogram].sort((a, b) => b - a);
+  const p50 = sortedRatios[Math.floor(sortedRatios.length / 2)] ?? 0;
+  const p90 = sortedRatios[Math.floor(sortedRatios.length * 0.1)] ?? 0;
+  const max = sortedRatios[0] ?? 0;
+  console.log(
+    `[Profitability] checked ${walletAddresses.length} addrs | ` +
+      `${withSwapHistory} with swap history | ` +
+      `${withMinTrades} with >=${MIN_TRADES} swaps | ` +
+      `${withPricedBuys} with priced buys | ` +
+      `${results.length} passed >=${MIN_PNL_RATIO}x | ` +
+      `pnl p50=${p50.toFixed(2)}x p90=${p90.toFixed(2)}x max=${max.toFixed(2)}x`
+  );
 
   return results;
 }
