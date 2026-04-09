@@ -90,7 +90,7 @@ export async function runScanPipeline(
       // Throttle between Helius enhanced-API calls to stay under the
       // free-tier burst limit; otherwise we exhaust our rate budget
       // before the profitability filter even starts.
-      if (i > 0) await new Promise((r) => setTimeout(r, 600));
+      if (i > 0) await new Promise((r) => setTimeout(r, 1000));
 
       const coin = trendingCoins[i];
       const traders = await fetchTopTradersForToken(coin.tokenAddress);
@@ -101,10 +101,18 @@ export async function runScanPipeline(
       );
     }
 
-    // Deduplicate
-    const uniqueAddresses = [...new Set(allTraderAddresses)];
+    // Deduplicate and cap candidate pool. Each surviving candidate
+    // costs ~1 second of Helius throttle + page-fetch time, so we
+    // have to stay under Vercel's 60s function limit. 40 keeps total
+    // scan duration comfortably below that. Raise this once we upgrade
+    // off the Helius free tier.
+    const MAX_CANDIDATES = 40;
+    const uniqueAddresses = [...new Set(allTraderAddresses)].slice(
+      0,
+      MAX_CANDIDATES
+    );
     console.log(
-      `[Pipeline] ${uniqueAddresses.length} unique wallets to analyze`
+      `[Pipeline] ${uniqueAddresses.length} unique wallets to analyze (capped at ${MAX_CANDIDATES})`
     );
 
     if (!uniqueAddresses.length) {
