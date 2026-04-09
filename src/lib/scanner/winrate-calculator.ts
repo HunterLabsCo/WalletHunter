@@ -1,11 +1,11 @@
 /**
  * Win Rate Calculator — SERVER-SIDE ONLY
  *
- * Uses FIFO cost basis to pair buys with sells per token.
+ * Uses FIFO USD cost basis to pair buys with sells per token.
  * Calculates win rates over 7d, 30d, and all-time.
  *
- * Win = sell proceeds > cost basis (in token amounts)
- * A minimum of 5 closed trades required to produce a win rate.
+ * Win = USD proceeds (from sells) > USD cost basis (from buys, FIFO matched)
+ * Minimum of 5 closed trades required to produce a win rate.
  * Rugged tokens (buys with no sells) count as losses.
  */
 
@@ -25,8 +25,8 @@ export interface WinRateResult {
 
 export interface TradeDetail {
   tokenAddress: string;
-  costBasis: number; // total tokens bought (FIFO matched)
-  proceeds: number; // total tokens sold
+  costBasis: number; // USD spent on buys (FIFO matched)
+  proceeds: number; // USD received from sells
   isWin: boolean;
   isClosed: boolean;
   openedAt: Date;
@@ -38,7 +38,7 @@ const WIN_RATE_THRESHOLD = 0.57; // 57% minimum
 
 /**
  * Calculate win rates from swap data.
- * Groups by token, pairs buys/sells via FIFO, determines win/loss.
+ * Groups by token, pairs buys/sells via FIFO, determines win/loss in USD.
  */
 export function calculateWinRate(
   walletAddress: string,
@@ -62,78 +62,34 @@ export function calculateWinRate(
       .filter((s) => s.side === "sell")
       .sort((a, b) => a.blockTime.getTime() - b.blockTime.getTime());
 
-    const totalBought = buys.reduce((sum, s) => sum + s.amountToken, 0);
-    const totalSold = sells.reduce((sum, s) => sum + s.amountToken, 0);
-
     if (buys.length === 0) continue;
 
-    const isClosed = sells.length > 0;
-    const openedAt = buys[0].blockTime;
-    const closedAt = sells.length > 0 ? sells[sells.length - 1].blockTime : null;
+    const totalBoughtUsd = buys.reduce((sum, s) => sum + s.amountUsd, 0);
+    const totalSoldUsd = sells.reduce((sum, s) => sum + s.amountUsd, 0);
+    const totalBoughtTokens = buys.reduce((sum, s) => sum + s.amountToken, 0);
+    const totalSoldTokens = sells.reduce((sum, s) => sum + s.amountToken, 0);
 
-    // FIFO cost basis matching
-    // A trade is a "win" if proceeds (tokens sold) > cost basis (tokens bought, matched FIFO)
-    // For token-denominated PNL, we compare sold amount vs bought amount
-    // If sold > bought (in same token), that's impossible for the same token...
-    // Actually, we need to think about this in SOL/USD terms.
-    //
-    // Simplified approach: compare total value out vs total value in
-    // Since we're using token amounts, we compare ratios:
-    // If wallet sold X tokens and bought Y tokens of the same type,
-    // the trade is a win if sellTotal >= buyTotal (they sold at higher prices)
-    //
-    // But we don't have USD prices at trade time. So we use a simpler heuristic:
-    // A position is a "win" if the wallet made more tokens selling than buying.
-    // This works because profitable traders sell fewer tokens for more SOL.
-    //
-    // Better approach: since ParsedSwap has amountToken, we check if there are
-    // both buys and sells. If sells exist and totalSold > 0, we consider:
-    // - The wallet exited the position (closed trade)
-    // - We compare sell count vs buy count as a proxy
-    //
-    // Most accurate: use the native SOL/USDC flows from the swap events
-    // For now, we use a practical heuristic based on token flow:
-    // Win = sold at least some tokens (exited with proceeds)
-    // Loss = bought but never sold (rugged) OR sold for less
-    //
-    // TODO: When Helius pricing data is integrated, use USD cost basis
+    // A position is "closed" once the wallet has sold at least 90% of the
+    // tokens it bought. Anything less is treated as still-open and excluded
+    // from win-rate denominators (shown separately as openPositions).
+    const exitRatio =
+      totalBoughtTokens > 0 ? totalSoldTokens / totalBoughtTokens : 0;
+    const isClosed = sells.length > 0 && exitRatio >= 0.9;
 
-    const isWin = isClosed && totalSold >= totalBought * 0.5;
-    // ^ If they recovered at least 50% of tokens, that's debatable.
-    // Better: if they have any sells at all for a meaningful position,
-    // we look at the actual ratio.
-
-    // More refined: token-amount PNL ratio
-    // If you bought 1000 tokens and sold 500 tokens, that's a loss in token terms.
-    // But if SOL price changed... we can't know without pricing.
-    //
-    // Practical: we look at whether the position is closed and whether
-    // the trade was exited voluntarily (sells exist) vs rugged (no sells).
-    // For the win/loss determination:
-    // - If no sells: LOSS (rugged or still open)
-    // - If sells exist: compare using the profitability from the pipeline
-
-    let tradeIsWin = false;
-    if (isClosed && totalBought > 0) {
-      // Use a ratio approach: if they sold more tokens than they bought,
-      // they likely did multiple buys at different prices (DCA)
-      // If they sold fewer tokens but the position is closed, it could still be a win
-      // (bought low, sold high = fewer tokens sold but more SOL received)
-      //
-      // Without USD pricing, best heuristic: if they exited (sold), count as win
-      // if totalSold represents a meaningful portion (>= 10% of bought)
-      // This is a temporary heuristic until we integrate USD pricing.
-      tradeIsWin = totalSold >= totalBought * 0.1;
-    }
+    // FIFO USD cost basis: pair the realized exit proceeds against the USD
+    // actually paid for the matched buy slice. Since we treat a position as
+    // ~fully closed (>=90% exit), comparing total USD in vs total USD out
+    // is a fair approximation without per-lot lot tracking.
+    const isWin = isClosed && totalSoldUsd > totalBoughtUsd;
 
     tradeDetails.push({
       tokenAddress,
-      costBasis: totalBought,
-      proceeds: totalSold,
-      isWin: tradeIsWin,
+      costBasis: totalBoughtUsd,
+      proceeds: totalSoldUsd,
+      isWin,
       isClosed,
-      openedAt,
-      closedAt,
+      openedAt: buys[0].blockTime,
+      closedAt: sells.length > 0 ? sells[sells.length - 1].blockTime : null,
     });
   }
 

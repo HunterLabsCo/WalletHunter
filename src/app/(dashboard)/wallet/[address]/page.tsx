@@ -260,10 +260,10 @@ export default function WalletDetailPage({
                       PNL Ratio
                     </th>
                     <th className="text-right py-3 px-2 font-medium">
-                      Realized PNL
+                      Realized PNL (USD)
                     </th>
                     <th className="text-right py-3 px-2 font-medium">
-                      Amount Bought
+                      Amount Bought (USD)
                     </th>
                   </tr>
                 </thead>
@@ -285,12 +285,12 @@ export default function WalletDetailPage({
                       </td>
                       <td className="text-right py-3 px-2">
                         {entry.realizedPnl
-                          ? parseFloat(entry.realizedPnl).toFixed(2)
+                          ? `$${parseFloat(entry.realizedPnl).toFixed(2)}`
                           : "--"}
                       </td>
                       <td className="text-right py-3 px-2 text-muted-foreground">
                         {entry.amountBought
-                          ? parseFloat(entry.amountBought).toFixed(2)
+                          ? `$${parseFloat(entry.amountBought).toFixed(2)}`
                           : "--"}
                       </td>
                     </tr>
