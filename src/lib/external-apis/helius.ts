@@ -267,7 +267,14 @@ export async function fetchWalletSwaps(
     if (before) url.searchParams.set("before", before);
 
     const res = await fetch(url.toString(), { next: { revalidate: 0 } });
-    if (!res.ok) break;
+    if (!res.ok) {
+      // Surface the actual failure (rate limit, auth, server error) so we
+      // can diagnose silent emptiness in the pipeline.
+      console.warn(
+        `[Helius] fetchWalletSwaps ${walletAddress.slice(0, 8)}… page ${page} returned ${res.status} ${res.statusText}`
+      );
+      break;
+    }
 
     const txns: HeliusTransaction[] = await res.json();
     if (!txns.length) break;
