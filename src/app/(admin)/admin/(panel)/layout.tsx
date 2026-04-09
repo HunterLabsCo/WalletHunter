@@ -1,4 +1,5 @@
 import { Providers } from "@/components/providers";
+import { AdminHeaderNav } from "./_components/admin-header-nav";
 
 export default function AdminPanelLayout({
   children,
@@ -34,14 +35,7 @@ export default function AdminPanelLayout({
               Audit Log
             </a>
           </nav>
-          <form action="/api/admin/logout" method="POST" className="ml-auto">
-            <button
-              type="submit"
-              className="text-sm text-muted-foreground hover:text-foreground"
-            >
-              Sign out
-            </button>
-          </form>
+          <AdminHeaderNav />
         </header>
         <main className="p-6">{children}</main>
       </div>
