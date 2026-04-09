@@ -121,12 +121,56 @@ export async function getTokenPrice(mint: string): Promise<number> {
 }
 
 /**
- * Fetch the current SOL/USD spot price from Jupiter.
- * Used to convert lamport flows on every swap into USD for PNL math.
- * Cached for 60s.
+ * Fetch the current SOL/USD spot price.
+ *
+ * Uses Binance's public unauthenticated ticker as the primary source — it's
+ * extremely reliable and rate limits are generous. CoinGecko is a fallback
+ * if Binance is unreachable. Cached for 60s via the token price cache.
+ *
+ * NB: Jupiter's older `price.jup.ag/v6/price` endpoint has been deprecated
+ * and now returns errors, which is why we don't use it here.
  */
 export async function getSolPriceUsd(): Promise<number> {
-  return getTokenPrice(SOL_MINT);
+  const cached = tokenPriceCache.get(SOL_MINT);
+  if (cached && Date.now() - cached.ts < 60_000) return cached.price;
+
+  // Binance primary
+  try {
+    const res = await fetch(
+      "https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT",
+      { next: { revalidate: 0 } }
+    );
+    if (res.ok) {
+      const data = (await res.json()) as { price?: string };
+      const price = parseFloat(data.price ?? "0");
+      if (price > 0) {
+        tokenPriceCache.set(SOL_MINT, { price, ts: Date.now() });
+        return price;
+      }
+    }
+  } catch {
+    // fall through to CoinGecko
+  }
+
+  // CoinGecko fallback
+  try {
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+      { next: { revalidate: 0 } }
+    );
+    if (res.ok) {
+      const data = (await res.json()) as { solana?: { usd?: number } };
+      const price = data.solana?.usd ?? 0;
+      if (price > 0) {
+        tokenPriceCache.set(SOL_MINT, { price, ts: Date.now() });
+        return price;
+      }
+    }
+  } catch {
+    // fall through
+  }
+
+  return 0;
 }
 
 // ─── Top Traders from Token ────────────────────────────────────────────────
@@ -166,11 +210,15 @@ export async function fetchTopTradersForToken(
   const txns: HeliusTransaction[] = await res.json();
 
   // Count appearances per fee payer so we can prefer wallets that have
-  // traded this token multiple times (more likely to be active humans, less
-  // likely to be one-shot test wallets).
+  // traded this token multiple times (more likely to be active humans).
+  //
+  // We do NOT gate on `tx.events?.swap` being present — Helius does not
+  // always parse a swap event for every SWAP-typed transaction (its parser
+  // doesn't recognize every AMM/router program), but the fee payer is still
+  // the human who signed the swap. PDAs cannot sign transactions, so a fee
+  // payer is by definition a real wallet.
   const feePayerCounts = new Map<string, number>();
   for (const tx of txns) {
-    if (!tx.events?.swap) continue;
     const fp = tx.feePayer;
     if (!fp || fp.startsWith("11111")) continue;
     feePayerCounts.set(fp, (feePayerCounts.get(fp) ?? 0) + 1);
