@@ -57,9 +57,10 @@ export async function filterByProfitability(
     // responses doesn't cause us to hammer the API and trigger sustained
     // rate limiting. Helius's free tier enforces a tight burst limit on
     // its Enhanced Transactions endpoint (well below the documented 10
-    // req/s for raw RPC). 600ms keeps us at ~1.6 req/s which production
-    // testing showed sustains without 429s.
-    if (i > 0) await new Promise((r) => setTimeout(r, 600));
+    // req/s for raw RPC). 1000ms keeps us at 1 req/s, under any
+    // observed burst threshold. Drop this once we upgrade to the paid
+    // Developer tier (~50 req/s).
+    if (i > 0) await new Promise((r) => setTimeout(r, 1000));
 
     const address = walletAddresses[i];
     try {
