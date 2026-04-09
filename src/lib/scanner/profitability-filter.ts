@@ -37,8 +37,10 @@ export async function filterByProfitability(
   const solPriceUsd = await getSolPriceUsd();
   if (!solPriceUsd) {
     console.warn(
-      "[Profitability] SOL price unavailable from Jupiter — PNL math will be inaccurate this scan"
+      "[Profitability] SOL price unavailable — PNL math will be inaccurate this scan"
     );
+  } else {
+    console.log(`[Profitability] using SOL price = $${solPriceUsd.toFixed(2)}`);
   }
 
   const results: WalletProfitability[] = [];
@@ -50,7 +52,13 @@ export async function filterByProfitability(
   let withPricedBuys = 0;
   const pnlRatioHistogram: number[] = [];
 
-  for (const address of walletAddresses) {
+  for (let i = 0; i < walletAddresses.length; i++) {
+    // Always throttle BEFORE the Helius call so a string of empty/error
+    // responses doesn't cause us to hammer the API and trigger sustained
+    // rate limiting. Helius free tier is ~10 req/s; 110ms keeps us safe.
+    if (i > 0) await new Promise((r) => setTimeout(r, 110));
+
+    const address = walletAddresses[i];
     try {
       const swaps = await fetchWalletSwaps(address, daysBack, solPriceUsd);
 
@@ -102,9 +110,6 @@ export async function filterByProfitability(
           swaps,
         });
       }
-
-      // Rate limit protection (Helius free tier ~10 req/s)
-      await new Promise((r) => setTimeout(r, 110));
     } catch (error) {
       console.error(`Error processing wallet ${address}:`, error);
       continue;
