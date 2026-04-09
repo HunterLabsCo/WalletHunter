@@ -86,7 +86,13 @@ export async function runScanPipeline(
     console.log("[Pipeline] Fetching top traders...");
     const allTraderAddresses: string[] = [];
 
-    for (const coin of trendingCoins) {
+    for (let i = 0; i < trendingCoins.length; i++) {
+      // Throttle between Helius enhanced-API calls to stay under the
+      // free-tier burst limit; otherwise we exhaust our rate budget
+      // before the profitability filter even starts.
+      if (i > 0) await new Promise((r) => setTimeout(r, 600));
+
+      const coin = trendingCoins[i];
       const traders = await fetchTopTradersForToken(coin.tokenAddress);
       const addresses = traders.map((t) => t.walletAddress);
       allTraderAddresses.push(...addresses);
