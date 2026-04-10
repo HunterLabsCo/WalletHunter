@@ -15,7 +15,6 @@ function getApiKey(): string {
 }
 
 const HELIUS_BASE = "https://api.helius.xyz";
-const RPC_BASE = "https://mainnet.helius-rpc.com";
 
 // Well-known mints used for USD denomination
 const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -79,23 +78,6 @@ export interface ParsedSwap {
   programId: string;
 }
 
-export interface WalletStats {
-  address: string;
-  firstTransactionTime: number | null;
-  walletAgeDays: number;
-  totalSwaps30d: number;
-  failedTxRatio: number;
-  swapTimestamps: number[]; // for burst detection
-  uniqueTokens7d: string[];
-  medianHoldTimeSeconds: number;
-  dexPrograms: string[]; // unique DEX programs used
-  priorityFees: number[]; // for variance calculation
-  positionSizes: number[]; // for variance calculation
-  firstBlockBuys: number; // count of buys in first 2 blocks
-  totalBuys: number;
-  jitoTipCount: number; // known MEV program interactions
-  lossCount: number; // realized losses
-}
 
 // ─── Token Metadata Cache ──────────────────────────────────────────────────
 
@@ -173,93 +155,110 @@ export async function getSolPriceUsd(): Promise<number> {
   return 0;
 }
 
-// ─── Top Traders from Token ────────────────────────────────────────────────
+// ─── Top Traders from Token (with per-token 3x filter) ───────────────────
+
+const MIN_PNL_RATIO = 3.0;
 
 /**
- * Get top traders for a token by fetching recent swap transactions and
- * extracting the human signer (fee payer) of each swap.
+ * Determine whether a swap event bought or sold `tokenMint`, and the USD
+ * value of the counter-leg (SOL / USDC / USDT side).
  *
- * IMPORTANT: We *only* use `tx.feePayer`, not `tokenInputs[].userAccount` /
- * `tokenOutputs[].userAccount`. For Jupiter / aggregator swaps, those user
- * account fields point at routing PDAs (program-owned accounts that move
- * tokens between AMMs as part of the swap path), not human wallets. Querying
- * those PDAs for swap history returns empty results, which silently
- * eliminates every candidate wallet downstream.
+ * This is TOKEN-CENTRIC, not wallet-centric: it checks whether the target
+ * token appears in the swap's inputs vs outputs. This avoids the PDA
+ * problem entirely — we don't need to match `userAccount` to the feePayer.
+ */
+function classifySwapForToken(
+  swap: HeliusSwapEvent,
+  tokenMint: string,
+  solPriceUsd: number
+): { side: "buy" | "sell" | null; usdValue: number } {
+  const tokenInInputs = (swap.tokenInputs ?? []).some(
+    (t) => t.mint === tokenMint
+  );
+  const tokenInOutputs = (swap.tokenOutputs ?? []).some(
+    (t) => t.mint === tokenMint
+  );
+
+  if (!tokenInInputs && !tokenInOutputs) return { side: null, usdValue: 0 };
+
+  // Token only in outputs → someone BOUGHT it (paid SOL/USDC in)
+  if (tokenInOutputs && !tokenInInputs) {
+    return { side: "buy", usdValue: usdLeg(swap, "input", solPriceUsd) };
+  }
+
+  // Token only in inputs → someone SOLD it (received SOL/USDC out)
+  if (tokenInInputs && !tokenInOutputs) {
+    return { side: "sell", usdValue: usdLeg(swap, "output", solPriceUsd) };
+  }
+
+  // Token in both sides → partial / complex swap, skip
+  return { side: null, usdValue: 0 };
+}
+
+/** Sum the USD value of the SOL + stablecoin leg on one side of a swap. */
+function usdLeg(
+  swap: HeliusSwapEvent,
+  direction: "input" | "output",
+  solPriceUsd: number
+): number {
+  let usd = 0;
+  if (direction === "input") {
+    if (swap.nativeInput) {
+      usd += (Number(swap.nativeInput.amount) / 1e9) * solPriceUsd;
+    }
+    for (const t of swap.tokenInputs ?? []) {
+      if (STABLE_MINTS.has(t.mint)) usd += t.tokenAmount;
+    }
+  } else {
+    if (swap.nativeOutput) {
+      usd += (Number(swap.nativeOutput.amount) / 1e9) * solPriceUsd;
+    }
+    for (const t of swap.tokenOutputs ?? []) {
+      if (STABLE_MINTS.has(t.mint)) usd += t.tokenAmount;
+    }
+  }
+  return usd;
+}
+
+/**
+ * Fetch top traders for a token and filter to wallets with >= 3x profitability
+ * on THIS specific token.
+ *
+ * Combined trader-discovery + profitability filter in one step:
+ * 1. Fetch up to 200 SWAP txs for the token mint (2 pages)
+ * 2. For each tx, classify whether the feePayer bought or sold the token
+ * 3. Group by feePayer: sum USD bought vs USD sold
+ * 4. Return only wallets where SOLD / BOUGHT >= 3x
  *
  * The fee payer is the wallet that signed and paid for the transaction —
- * that's the actual trader.
+ * that's the actual trader. PDAs cannot sign transactions.
+ *
+ * @param solPriceUsd - Current SOL/USD spot for denominating the SOL leg.
+ *   Fetch once per scan via `getSolPriceUsd()` and pass to all calls.
  */
 export async function fetchTopTradersForToken(
   tokenMint: string,
-  limit = 50
-): Promise<Array<{ walletAddress: string; realizedPnl: number; amountBought: number; pnlRatio: number }>> {
-  const apiKey = getApiKey();
-
-  // Fetch recent parsed swap transactions involving this token
-  const res = await fetch(
-    `${HELIUS_BASE}/v0/addresses/${tokenMint}/transactions?api-key=${apiKey}&type=SWAP&limit=100`,
-    { next: { revalidate: 0 } }
-  );
-
-  if (!res.ok) {
-    throw new Error(
-      `Helius top traders fetch failed: ${res.status} ${res.statusText}`
-    );
-  }
-
-  const txns: HeliusTransaction[] = await res.json();
-
-  // Count appearances per fee payer so we can prefer wallets that have
-  // traded this token multiple times (more likely to be active humans).
-  //
-  // We do NOT gate on `tx.events?.swap` being present — Helius does not
-  // always parse a swap event for every SWAP-typed transaction (its parser
-  // doesn't recognize every AMM/router program), but the fee payer is still
-  // the human who signed the swap. PDAs cannot sign transactions, so a fee
-  // payer is by definition a real wallet.
-  const feePayerCounts = new Map<string, number>();
-  for (const tx of txns) {
-    const fp = tx.feePayer;
-    if (!fp || fp.startsWith("11111")) continue;
-    feePayerCounts.set(fp, (feePayerCounts.get(fp) ?? 0) + 1);
-  }
-
-  const wallets = [...feePayerCounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, limit)
-    .map(([addr]) => addr);
-
-  return wallets.map((addr) => ({
-    walletAddress: addr,
-    realizedPnl: 0, // populated later by pipeline
-    amountBought: 0,
-    pnlRatio: 0,
-  }));
-}
-
-// ─── Wallet Transaction History ────────────────────────────────────────────
-
-/**
- * Fetch all swap transactions for a wallet (last 90 days max).
- *
- * @param solPriceUsd - Current SOL/USD price used to denominate the SOL leg
- *   of every swap into USD. Pass the same value for the whole scan so PNL is
- *   self-consistent. If 0/omitted, swaps that pay/receive SOL will have
- *   amountUsd = 0 and won't contribute to profitability/win-rate math.
- */
-export async function fetchWalletSwaps(
-  walletAddress: string,
-  daysBack = 30,
+  limit = 50,
   solPriceUsd = 0
-): Promise<ParsedSwap[]> {
+): Promise<
+  Array<{
+    walletAddress: string;
+    realizedPnl: number;
+    amountBought: number;
+    pnlRatio: number;
+  }>
+> {
   const apiKey = getApiKey();
-  const cutoffTime = Math.floor(Date.now() / 1000) - daysBack * 86400;
-  const swaps: ParsedSwap[] = [];
+
+  // Fetch up to 200 SWAP txs for the token (2 pages × 100)
+  const allTxns: HeliusTransaction[] = [];
   let before: string | undefined;
 
-  for (let page = 0; page < 10; page++) {
+  for (let page = 0; page < 2; page++) {
+    if (page > 0) await new Promise((r) => setTimeout(r, 1000));
+
     const url = new URL(
-      `${HELIUS_BASE}/v0/addresses/${walletAddress}/transactions`
+      `${HELIUS_BASE}/v0/addresses/${tokenMint}/transactions`
     );
     url.searchParams.set("api-key", apiKey);
     url.searchParams.set("type", "SWAP");
@@ -268,266 +267,71 @@ export async function fetchWalletSwaps(
 
     const res = await fetch(url.toString(), { next: { revalidate: 0 } });
     if (!res.ok) {
-      // Surface the actual failure (rate limit, auth, server error) so we
-      // can diagnose silent emptiness in the pipeline.
-      console.warn(
-        `[Helius] fetchWalletSwaps ${walletAddress.slice(0, 8)}… page ${page} returned ${res.status} ${res.statusText}`
-      );
+      if (page === 0) {
+        throw new Error(
+          `Helius top traders fetch failed: ${res.status} ${res.statusText}`
+        );
+      }
       break;
     }
 
     const txns: HeliusTransaction[] = await res.json();
     if (!txns.length) break;
 
-    let reachedCutoff = false;
-    for (const tx of txns) {
-      if (tx.timestamp < cutoffTime) {
-        reachedCutoff = true;
-        break;
-      }
-
-      const parsed = parseSwapTransaction(tx, walletAddress, solPriceUsd);
-      if (parsed) swaps.push(parsed);
-    }
-
-    if (reachedCutoff) break;
+    allTxns.push(...txns);
     before = txns[txns.length - 1].signature;
-    // Small delay to respect rate limits
-    await new Promise((r) => setTimeout(r, 110));
   }
 
-  return swaps;
-}
+  // Per-wallet buy/sell USD tracking on THIS token
+  const walletPnl = new Map<
+    string,
+    { boughtUsd: number; soldUsd: number }
+  >();
 
-/**
- * Parse a Helius transaction into a structured swap.
- *
- * Determines whether the wallet bought or sold the non-stable token, and
- * computes the USD value of the swap from the SOL/USDC/USDT counter-leg.
- *
- * @param solPriceUsd - SOL/USD spot price (passed in so a single scan stays
- *   self-consistent and we don't refetch the price 10k times).
- */
-function parseSwapTransaction(
-  tx: HeliusTransaction,
-  walletAddress: string,
-  solPriceUsd: number
-): ParsedSwap | null {
-  if (!tx.events?.swap) return null;
+  for (const tx of allTxns) {
+    const fp = tx.feePayer;
+    if (!fp || fp.startsWith("11111")) continue;
 
-  const swap = tx.events.swap;
-  const blockTime = new Date(tx.timestamp * 1000);
+    const swap = tx.events?.swap;
+    if (!swap) continue;
 
-  const tokenOutputs = swap.tokenOutputs ?? [];
-  const tokenInputs = swap.tokenInputs ?? [];
+    const { side, usdValue } = classifySwapForToken(
+      swap,
+      tokenMint,
+      solPriceUsd
+    );
+    if (!side || usdValue <= 0) continue;
 
-  // Wallet's non-stable token movements. Stables are the *payment* leg —
-  // we never want to mark a USDC receipt as a "buy of USDC".
-  const receivedNonStable = tokenOutputs.find(
-    (o) =>
-      o.userAccount === walletAddress &&
-      o.mint &&
-      !STABLE_MINTS.has(o.mint) &&
-      o.tokenAmount > 0
-  );
-  const sentNonStable = tokenInputs.find(
-    (i) =>
-      i.userAccount === walletAddress &&
-      i.mint &&
-      !STABLE_MINTS.has(i.mint) &&
-      i.tokenAmount > 0
-  );
-
-  // Compute the USD value the wallet paid (when buying) or received (when
-  // selling) by inspecting the SOL/stablecoin leg of the swap.
-  const usdValueOfWalletInputs = (): number => {
-    const solPaid =
-      swap.nativeInput && swap.nativeInput.account === walletAddress
-        ? Number(swap.nativeInput.amount) / 1e9
-        : 0;
-    const stablePaid = tokenInputs
-      .filter(
-        (i) =>
-          i.userAccount === walletAddress &&
-          i.mint &&
-          STABLE_MINTS.has(i.mint)
-      )
-      .reduce((sum, i) => sum + i.tokenAmount, 0);
-    return solPaid * solPriceUsd + stablePaid;
-  };
-
-  const usdValueOfWalletOutputs = (): number => {
-    const solReceived =
-      swap.nativeOutput && swap.nativeOutput.account === walletAddress
-        ? Number(swap.nativeOutput.amount) / 1e9
-        : 0;
-    const stableReceived = tokenOutputs
-      .filter(
-        (o) =>
-          o.userAccount === walletAddress &&
-          o.mint &&
-          STABLE_MINTS.has(o.mint)
-      )
-      .reduce((sum, o) => sum + o.tokenAmount, 0);
-    return solReceived * solPriceUsd + stableReceived;
-  };
-
-  if (receivedNonStable) {
-    return {
-      walletAddress,
-      tokenAddress: receivedNonStable.mint,
-      side: "buy",
-      amountToken: receivedNonStable.tokenAmount,
-      amountUsd: usdValueOfWalletInputs(),
-      txSignature: tx.signature,
-      blockTime,
-      programId: tx.source ?? "",
-    };
+    const existing = walletPnl.get(fp) ?? { boughtUsd: 0, soldUsd: 0 };
+    if (side === "buy") existing.boughtUsd += usdValue;
+    else existing.soldUsd += usdValue;
+    walletPnl.set(fp, existing);
   }
 
-  if (sentNonStable) {
-    return {
-      walletAddress,
-      tokenAddress: sentNonStable.mint,
-      side: "sell",
-      amountToken: sentNonStable.tokenAmount,
-      amountUsd: usdValueOfWalletOutputs(),
-      txSignature: tx.signature,
-      blockTime,
-      programId: tx.source ?? "",
-    };
-  }
+  // Filter >= 3x and sort by ratio (best first)
+  const results = [...walletPnl.entries()]
+    .filter(
+      ([, pnl]) =>
+        pnl.boughtUsd > 0 && pnl.soldUsd / pnl.boughtUsd >= MIN_PNL_RATIO
+    )
+    .map(([addr, pnl]) => ({
+      walletAddress: addr,
+      realizedPnl: pnl.soldUsd - pnl.boughtUsd,
+      amountBought: pnl.boughtUsd,
+      pnlRatio: pnl.soldUsd / pnl.boughtUsd,
+    }))
+    .sort((a, b) => b.pnlRatio - a.pnlRatio)
+    .slice(0, limit);
 
-  return null;
-}
-
-// ─── Wallet Age & Stats ─────────────────────────────────────────────────────
-
-/**
- * Get basic wallet stats needed for bot filtering
- */
-export async function fetchWalletStats(
-  walletAddress: string
-): Promise<Pick<WalletStats, "walletAgeDays" | "firstTransactionTime">> {
-  const apiKey = getApiKey();
-
-  // Get oldest transaction to determine wallet age
-  const res = await fetch(
-    `${HELIUS_BASE}/v0/addresses/${walletAddress}/transactions?api-key=${apiKey}&limit=1&before=`,
-    { next: { revalidate: 0 } }
+  console.log(
+    `[Helius] ${tokenMint.slice(0, 8)}…: ${allTxns.length} txs, ` +
+      `${walletPnl.size} unique wallets, ${results.length} passed >= ${MIN_PNL_RATIO}x`
   );
 
-  if (!res.ok) {
-    return { walletAgeDays: 0, firstTransactionTime: null };
-  }
-
-  // Use RPC to get account creation time more accurately
-  const rpcRes = await fetch(`${RPC_BASE}/?api-key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "getSignaturesForAddress",
-      params: [walletAddress, { limit: 1, commitment: "finalized" }],
-    }),
-    next: { revalidate: 0 },
-  });
-
-  if (!rpcRes.ok) return { walletAgeDays: 0, firstTransactionTime: null };
-
-  const rpcData = await rpcRes.json();
-  const signatures = rpcData.result ?? [];
-
-  // Also get the oldest signature to find wallet creation
-  const oldestRes = await fetch(`${RPC_BASE}/?api-key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 2,
-      method: "getSignaturesForAddress",
-      params: [
-        walletAddress,
-        { limit: 1, commitment: "finalized", before: undefined },
-      ],
-    }),
-    next: { revalidate: 0 },
-  });
-
-  void signatures;
-  void res;
-
-  if (!oldestRes.ok) return { walletAgeDays: 0, firstTransactionTime: null };
-
-  // Fetch the first ever transaction
-  const firstTxRes = await fetch(`${RPC_BASE}/?api-key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 3,
-      method: "getSignaturesForAddress",
-      params: [
-        walletAddress,
-        {
-          limit: 1000,
-          commitment: "finalized",
-        },
-      ],
-    }),
-    next: { revalidate: 0 },
-  });
-
-  if (!firstTxRes.ok) return { walletAgeDays: 0, firstTransactionTime: null };
-
-  const firstTxData = await firstTxRes.json();
-  const allSigs = firstTxData.result ?? [];
-
-  if (!allSigs.length) return { walletAgeDays: 0, firstTransactionTime: null };
-
-  // Oldest is last in the array (sorted newest-first)
-  const oldest = allSigs[allSigs.length - 1];
-  const firstTs: number = oldest.blockTime ?? 0;
-
-  if (!firstTs) return { walletAgeDays: 0, firstTransactionTime: null };
-
-  const ageDays = Math.floor((Date.now() / 1000 - firstTs) / 86400);
-
-  return { walletAgeDays: ageDays, firstTransactionTime: firstTs };
+  return results;
 }
 
-// ─── Batch RPC Calls ────────────────────────────────────────────────────────
-
-/**
- * Get transaction count for a wallet in last 30 days via RPC
- */
-export async function fetchRecentTransactionCount(
-  walletAddress: string,
-  daysBack = 30
-): Promise<{ total: number; failed: number }> {
-  const apiKey = getApiKey();
-  const cutoff = Math.floor(Date.now() / 1000) - daysBack * 86400;
-
-  const res = await fetch(`${RPC_BASE}/?api-key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "getSignaturesForAddress",
-      params: [walletAddress, { limit: 1000, commitment: "finalized" }],
-    }),
-    next: { revalidate: 0 },
-  });
-
-  if (!res.ok) return { total: 0, failed: 0 };
-
-  const data = await res.json();
-  const sigs: Array<{ blockTime: number; err: unknown }> = data.result ?? [];
-
-  const recent = sigs.filter((s) => s.blockTime >= cutoff);
-  const failed = recent.filter((s) => s.err !== null).length;
-
-  return { total: recent.length, failed };
-}
+// ─── NOTE: Wallet-level functions removed ─────────────────────────────────
+// fetchWalletSwaps, fetchWalletStats, fetchRecentTransactionCount have been
+// replaced by SolScan (src/lib/external-apis/solscan.ts). Helius is now
+// used only for per-token queries (fetchTopTradersForToken).
