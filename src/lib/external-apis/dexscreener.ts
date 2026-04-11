@@ -294,13 +294,30 @@ async function fetchTrendingViaWebSocket(): Promise<DecodedPair[]> {
 
 // ─── REST API Fallback ──────────────────────────────────────────────────────
 
+// Tokens that are NOT interesting as trending candidates.
+// When one of these is the base token, we want the OTHER side of the pair.
+const SKIP_TOKENS = new Set([
+  "So11111111111111111111111111111111111111112", // Wrapped SOL
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+]);
+
 /**
  * Extract a TrendingCoin from a raw DexScreener pair object.
- * Handles both v1 and v2 API response shapes defensively.
+ * Picks the "interesting" token — skips SOL/USDC/USDT.
  */
 function pairToTrendingCoin(p: Record<string, unknown>): TrendingCoin | null {
   const base = p.baseToken as Record<string, unknown> | undefined;
-  if (!base?.address || !base?.symbol) return null;
+  const quote = p.quoteToken as Record<string, unknown> | undefined;
+  if (!base?.address || !quote?.address) return null;
+
+  // Pick the interesting token: if base is SOL/USDC/USDT, use quote instead
+  let token = base;
+  if (SKIP_TOKENS.has(base.address as string) && !SKIP_TOKENS.has(quote.address as string)) {
+    token = quote;
+  }
+
+  if (!token?.symbol) return null;
 
   // Volume can be nested (v2: { h24 }) or flat (v1: volume24h, volumeH24)
   const vol = p.volume as Record<string, number> | undefined;
@@ -311,9 +328,9 @@ function pairToTrendingCoin(p: Record<string, unknown>): TrendingCoin | null {
   const liquidity = liq?.usd ?? (p as Record<string, number>).liquidityUsd ?? 0;
 
   return {
-    tokenAddress: base.address as string,
-    symbol: base.symbol as string,
-    name: (base.name as string) ?? (base.symbol as string),
+    tokenAddress: token.address as string,
+    symbol: token.symbol as string,
+    name: (token.name as string) ?? (token.symbol as string),
     pairAddress: (p.pairAddress as string) ?? "",
     volume24h,
     liquidity,
@@ -355,7 +372,7 @@ async function fetchTrendingViaRest(): Promise<TrendingCoin[]> {
           return chain === "solana" && liquidityUsd >= 50_000;
         })
         .map(pairToTrendingCoin)
-        .filter((c): c is TrendingCoin => c !== null);
+        .filter((c): c is TrendingCoin => c !== null && !SKIP_TOKENS.has(c.tokenAddress));
 
       // Dedupe by token address, keep highest volume
       const byToken = new Map<string, TrendingCoin>();
