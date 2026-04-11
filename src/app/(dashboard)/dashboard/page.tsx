@@ -217,14 +217,18 @@ export default function DashboardPage() {
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <Search className="w-12 h-12 text-muted-foreground/30 mb-4" />
               <h3 className="font-semibold text-foreground mb-1">
-                No wallets discovered yet
+                {(scanData?.totalScans ?? 0) > 0
+                  ? "No wallets passed all filters"
+                  : "No wallets discovered yet"}
               </h3>
               <p className="text-sm text-muted-foreground max-w-sm">
-                Click &quot;Scan Now&quot; to search trending Solana coins and discover profitable wallets.
+                {(scanData?.totalScans ?? 0) > 0
+                  ? "Recent scans didn\u0027t find wallets matching all criteria. Try scanning again — trending coins rotate frequently."
+                  : "Click \"Scan Now\" to search trending Solana coins and discover profitable wallets."}
               </p>
               <Button className="mt-4 gap-2" onClick={handleScan} disabled={scanning}>
                 <Search className="w-4 h-4" />
-                Run First Scan
+                {(scanData?.totalScans ?? 0) > 0 ? "Scan Again" : "Run First Scan"}
               </Button>
             </div>
           ) : (
