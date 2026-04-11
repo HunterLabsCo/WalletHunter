@@ -339,74 +339,84 @@ function pairToTrendingCoin(p: Record<string, unknown>): TrendingCoin | null {
 }
 
 /**
- * Fallback: fetch trending-like Solana tokens via DexScreener REST API.
+ * Fallback: fetch REAL trending Solana tokens via GeckoTerminal REST API.
  *
- * Uses /token-boosts/top/v1 — these are actively boosted tokens with real
- * trading activity. Not identical to the WebSocket trending score, but the
- * old code used this same endpoint and it worked (found SPIKE, MATT, LOL).
+ * GeckoTerminal (by CoinGecko) provides a free trending pools endpoint
+ * that returns actually trending pairs — not boosted/paid tokens.
+ * This is the closest REST equivalent to DexScreener's WebSocket trending.
  */
 async function fetchTrendingViaRest(): Promise<TrendingCoin[]> {
-  console.warn(
-    "[DexScreener] Using REST fallback (token boosts)"
-  );
+  console.log("[DexScreener] Using GeckoTerminal trending pools (REST fallback)");
 
   const res = await fetch(
-    `${DEXSCREENER_BASE}/token-boosts/top/v1`,
+    "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1",
     { headers: { Accept: "application/json" } }
   );
 
   if (!res.ok) {
-    throw new Error(`DexScreener boosts API failed: ${res.status}`);
+    throw new Error(`GeckoTerminal trending API failed: ${res.status}`);
   }
 
-  const boosts: Array<Record<string, unknown>> = await res.json();
-  console.log(`[DexScreener] Boosts returned ${boosts.length} tokens`);
+  const json = await res.json();
+  const pools: Array<Record<string, unknown>> = json?.data ?? [];
+  console.log(`[GeckoTerminal] Trending returned ${pools.length} pools`);
 
-  // Filter to Solana tokens only
-  const solanaTokens = boosts
-    .filter((b) => (b.chainId as string) === "solana" && b.tokenAddress)
-    .filter((b) => !SKIP_TOKENS.has(b.tokenAddress as string));
-
-  console.log(`[DexScreener] ${solanaTokens.length} Solana tokens from boosts`);
-
-  if (!solanaTokens.length) {
-    throw new Error("No Solana tokens in boosts");
-  }
-
-  // Fetch pair data for top 5 candidates (we want 3, extras are backup)
   const coins: TrendingCoin[] = [];
-  for (const boost of solanaTokens.slice(0, 6)) {
-    const addr = boost.tokenAddress as string;
-    try {
-      const pairRes = await fetch(
-        `${DEXSCREENER_BASE}/tokens/v1/solana/${addr}`,
-        { headers: { Accept: "application/json" } }
-      );
-      if (!pairRes.ok) {
-        console.warn(`[DexScreener] Pair fetch failed for ${addr}: ${pairRes.status}`);
-        continue;
-      }
+  const seenTokens = new Set<string>();
 
-      const pairData = await pairRes.json();
-      const pairs: Record<string, unknown>[] = Array.isArray(pairData)
-        ? pairData
-        : (pairData as Record<string, unknown>).pairs as Record<string, unknown>[] ?? [];
+  for (const pool of pools) {
+    const attrs = pool.attributes as Record<string, unknown> | undefined;
+    const rels = pool.relationships as Record<string, unknown> | undefined;
+    if (!attrs || !rels) continue;
 
-      if (pairs.length > 0) {
-        const coin = pairToTrendingCoin(pairs[0]);
-        if (coin && !SKIP_TOKENS.has(coin.tokenAddress)) {
-          coins.push(coin);
-          console.log(`[DexScreener] Got: ${coin.symbol} (${addr.slice(0, 8)}…)`);
-        }
-      }
-    } catch (err) {
-      console.warn(`[DexScreener] Error fetching pair for ${addr.slice(0, 8)}…:`, err);
+    // Extract base and quote token addresses
+    const baseData = (rels.base_token as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
+    const quoteData = (rels.quote_token as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
+
+    // Token IDs come as "solana_<address>"
+    const baseId = (baseData?.id as string) ?? "";
+    const quoteId = (quoteData?.id as string) ?? "";
+    const baseAddr = baseId.replace("solana_", "");
+    const quoteAddr = quoteId.replace("solana_", "");
+
+    // Pick the interesting token (not SOL/USDC/USDT)
+    let tokenAddr = baseAddr;
+    if (SKIP_TOKENS.has(baseAddr)) {
+      if (SKIP_TOKENS.has(quoteAddr)) continue; // Both boring, skip
+      tokenAddr = quoteAddr;
     }
+
+    if (seenTokens.has(tokenAddr)) continue;
+    seenTokens.add(tokenAddr);
+
+    // Parse name — format is usually "TOKEN / SOL"
+    const poolName = (attrs.name as string) ?? "";
+    const tokenSymbol = poolName.split(/\s*\/\s*/)[SKIP_TOKENS.has(baseAddr) ? 1 : 0] ?? poolName;
+
+    const volObj = attrs.volume_usd as Record<string, string> | undefined;
+    const volume24h = parseFloat(volObj?.h24 ?? "0") || 0;
+    const liquidity = parseFloat((attrs.reserve_in_usd as string) ?? "0") || 0;
+    const fdv = parseFloat((attrs.fdv_usd as string) ?? "0") || 0;
+
+    if (liquidity < 50_000) continue; // Skip low-liquidity pairs
+
+    coins.push({
+      tokenAddress: tokenAddr,
+      symbol: tokenSymbol,
+      name: tokenSymbol,
+      pairAddress: (attrs.address as string) ?? "",
+      volume24h,
+      liquidity,
+      fdv,
+    });
+
+    console.log(`[GeckoTerminal] Trending: ${tokenSymbol} (${tokenAddr.slice(0, 8)}…) vol=$${Math.round(volume24h).toLocaleString()}`);
+
     if (coins.length >= 3) break;
   }
 
   console.log(
-    `[DexScreener] REST fallback found ${coins.length} coins:`,
+    `[GeckoTerminal] Found ${coins.length} trending coins:`,
     coins.map((c) => c.symbol).join(", ")
   );
   return coins;
