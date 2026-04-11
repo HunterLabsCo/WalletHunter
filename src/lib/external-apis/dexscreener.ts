@@ -339,127 +339,77 @@ function pairToTrendingCoin(p: Record<string, unknown>): TrendingCoin | null {
 }
 
 /**
- * Fallback: fetch trending-like Solana pairs via DexScreener REST APIs.
+ * Fallback: fetch trending-like Solana tokens via DexScreener REST API.
  *
- * Strategy 1: /latest/dex/search (search for high-activity Solana pairs)
- * Strategy 2: /token-boosts/top/v1 (boosted tokens — not ideal but functional)
- *
- * Less accurate than the WebSocket's trendingScoreH6 but ensures we always
- * have tokens to scan.
+ * Uses /token-boosts/top/v1 — these are actively boosted tokens with real
+ * trading activity. Not identical to the WebSocket trending score, but the
+ * old code used this same endpoint and it worked (found SPIKE, MATT, LOL).
  */
 async function fetchTrendingViaRest(): Promise<TrendingCoin[]> {
   console.warn(
-    "[DexScreener] Using REST fallback — results may not match true trending"
+    "[DexScreener] Using REST fallback (token boosts)"
   );
 
-  // Strategy 1: Search for popular Solana pairs
-  try {
-    const res = await fetch(
-      `${DEXSCREENER_BASE}/latest/dex/search?q=SOL`,
-      { headers: { Accept: "application/json" } }
-    );
+  const res = await fetch(
+    `${DEXSCREENER_BASE}/token-boosts/top/v1`,
+    { headers: { Accept: "application/json" } }
+  );
 
-    if (res.ok) {
-      const data = await res.json();
-      const raw: Record<string, unknown>[] = data?.pairs ?? [];
-      console.log(`[DexScreener] REST search returned ${raw.length} pairs`);
-
-      const coins = raw
-        .filter((p) => {
-          const chain = (p.chainId as string) ?? "";
-          const liq = p.liquidity as Record<string, number> | undefined;
-          const liquidityUsd = liq?.usd ?? 0;
-          return chain === "solana" && liquidityUsd >= 50_000;
-        })
-        .map(pairToTrendingCoin)
-        .filter((c): c is TrendingCoin => c !== null && !SKIP_TOKENS.has(c.tokenAddress));
-
-      // Dedupe by token address, keep highest volume
-      const byToken = new Map<string, TrendingCoin>();
-      for (const coin of coins) {
-        const existing = byToken.get(coin.tokenAddress);
-        if (!existing || coin.volume24h > existing.volume24h) {
-          byToken.set(coin.tokenAddress, coin);
-        }
-      }
-
-      const sorted = [...byToken.values()]
-        .sort((a, b) => b.volume24h - a.volume24h)
-        .slice(0, 3);
-
-      if (sorted.length > 0) {
-        console.log(
-          `[DexScreener] REST search found ${sorted.length} coins:`,
-          sorted.map((c) => c.symbol).join(", ")
-        );
-        return sorted;
-      }
-    }
-  } catch (err) {
-    console.warn("[DexScreener] REST search failed:", err);
+  if (!res.ok) {
+    throw new Error(`DexScreener boosts API failed: ${res.status}`);
   }
 
-  // Strategy 2: Token boosts (paid boosts — not truly trending, but active)
-  try {
-    const res = await fetch(
-      `${DEXSCREENER_BASE}/token-boosts/top/v1`,
-      { headers: { Accept: "application/json" } }
-    );
+  const boosts: Array<Record<string, unknown>> = await res.json();
+  console.log(`[DexScreener] Boosts returned ${boosts.length} tokens`);
 
-    if (res.ok) {
-      const boosts: Array<Record<string, unknown>> = await res.json();
-      console.log(`[DexScreener] Boosts returned ${boosts.length} tokens`);
+  // Filter to Solana tokens only
+  const solanaTokens = boosts
+    .filter((b) => (b.chainId as string) === "solana" && b.tokenAddress)
+    .filter((b) => !SKIP_TOKENS.has(b.tokenAddress as string));
 
-      // Filter to Solana, take top 3
-      const solanaBoosts = boosts.filter(
-        (b) => (b.chainId as string) === "solana" && b.tokenAddress
+  console.log(`[DexScreener] ${solanaTokens.length} Solana tokens from boosts`);
+
+  if (!solanaTokens.length) {
+    throw new Error("No Solana tokens in boosts");
+  }
+
+  // Fetch pair data for top 5 candidates (we want 3, extras are backup)
+  const coins: TrendingCoin[] = [];
+  for (const boost of solanaTokens.slice(0, 6)) {
+    const addr = boost.tokenAddress as string;
+    try {
+      const pairRes = await fetch(
+        `${DEXSCREENER_BASE}/tokens/v1/solana/${addr}`,
+        { headers: { Accept: "application/json" } }
       );
+      if (!pairRes.ok) {
+        console.warn(`[DexScreener] Pair fetch failed for ${addr}: ${pairRes.status}`);
+        continue;
+      }
 
-      if (solanaBoosts.length > 0) {
-        // Fetch pair data for each boosted token
-        const addresses = solanaBoosts
-          .slice(0, 5)
-          .map((b) => b.tokenAddress as string);
+      const pairData = await pairRes.json();
+      const pairs: Record<string, unknown>[] = Array.isArray(pairData)
+        ? pairData
+        : (pairData as Record<string, unknown>).pairs as Record<string, unknown>[] ?? [];
 
-        const coins: TrendingCoin[] = [];
-        for (const addr of addresses) {
-          try {
-            const pairRes = await fetch(
-              `${DEXSCREENER_BASE}/tokens/v1/solana/${addr}`,
-              { headers: { Accept: "application/json" } }
-            );
-            if (!pairRes.ok) continue;
-
-            const pairData = await pairRes.json();
-            const pairs: Record<string, unknown>[] = Array.isArray(pairData)
-              ? pairData
-              : (pairData as Record<string, unknown>).pairs as Record<string, unknown>[] ?? [];
-
-            if (pairs.length > 0) {
-              const coin = pairToTrendingCoin(pairs[0]);
-              if (coin) coins.push(coin);
-            }
-          } catch {
-            continue;
-          }
-          if (coins.length >= 3) break;
-        }
-
-        if (coins.length > 0) {
-          console.log(
-            `[DexScreener] Boosts fallback found ${coins.length} coins:`,
-            coins.map((c) => c.symbol).join(", ")
-          );
-          return coins;
+      if (pairs.length > 0) {
+        const coin = pairToTrendingCoin(pairs[0]);
+        if (coin && !SKIP_TOKENS.has(coin.tokenAddress)) {
+          coins.push(coin);
+          console.log(`[DexScreener] Got: ${coin.symbol} (${addr.slice(0, 8)}…)`);
         }
       }
+    } catch (err) {
+      console.warn(`[DexScreener] Error fetching pair for ${addr.slice(0, 8)}…:`, err);
     }
-  } catch (err) {
-    console.warn("[DexScreener] Boosts fallback failed:", err);
+    if (coins.length >= 3) break;
   }
 
-  console.error("[DexScreener] All REST fallback strategies exhausted");
-  return [];
+  console.log(
+    `[DexScreener] REST fallback found ${coins.length} coins:`,
+    coins.map((c) => c.symbol).join(", ")
+  );
+  return coins;
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
