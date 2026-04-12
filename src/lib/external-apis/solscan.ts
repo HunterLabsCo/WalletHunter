@@ -76,7 +76,7 @@ export async function fetchWalletAge(address: string): Promise<number> {
   url.searchParams.set("sort_order", "asc");
 
   const res = await fetch(url.toString(), {
-    headers: { token: apiKey, Accept: "application/json" },
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
     next: { revalidate: 0 },
   });
 
