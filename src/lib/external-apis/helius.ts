@@ -225,10 +225,16 @@ function usdLeg(
  * on THIS specific token.
  *
  * Combined trader-discovery + profitability filter in one step:
- * 1. Fetch up to 200 SWAP txs for the token mint (2 pages)
+ * 1. Fetch up to 1000 SWAP txs for the token mint (10 pages × 100)
  * 2. For each tx, classify whether the feePayer bought or sold the token
  * 3. Group by feePayer: sum USD bought vs USD sold
  * 4. Return only wallets where SOLD / BOUGHT >= 3x
+ *
+ * We paginate until we run out of txs, hit the page cap, or reach the
+ * 30-day time cutoff — whichever comes first. More pages means more
+ * complete buy/sell cycles captured per wallet, which is essential for
+ * high-volume trending tokens where 200 txs can be just a few minutes
+ * of activity.
  *
  * The fee payer is the wallet that signed and paid for the transaction —
  * that's the actual trader. PDAs cannot sign transactions.
@@ -250,11 +256,15 @@ export async function fetchTopTradersForToken(
 > {
   const apiKey = getApiKey();
 
-  // Fetch up to 200 SWAP txs for the token (2 pages × 100)
+  // Fetch up to 1000 SWAP txs for the token (10 pages × 100).
+  // Stop early if we hit the 30-day cutoff — older data won't affect trending
+  // token analysis and burns extra time.
+  const MAX_PAGES = 10;
+  const cutoffTs = Math.floor(Date.now() / 1000) - 30 * 86400;
   const allTxns: HeliusTransaction[] = [];
   let before: string | undefined;
 
-  for (let page = 0; page < 2; page++) {
+  for (let page = 0; page < MAX_PAGES; page++) {
     if (page > 0) await new Promise((r) => setTimeout(r, 1000));
 
     const url = new URL(
@@ -280,6 +290,10 @@ export async function fetchTopTradersForToken(
 
     allTxns.push(...txns);
     before = txns[txns.length - 1].signature;
+
+    // Stop if the oldest tx in this batch is beyond 30 days
+    const oldestTs = txns[txns.length - 1].timestamp ?? 0;
+    if (oldestTs > 0 && oldestTs < cutoffTs) break;
   }
 
   // Per-wallet buy/sell USD tracking on THIS token
